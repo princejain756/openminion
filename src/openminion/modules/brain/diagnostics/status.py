@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
@@ -165,15 +165,21 @@ def coerce_phase_status(status: PhaseStatus | Mapping[str, Any] | None) -> Phase
         trace_id = str(payload.get("trace_id", "") or "phase-status").strip()
         payload["trace_id"] = trace_id or "phase-status"
         raw_status_key = str(payload.get("status_key", "") or "").strip()
-        if raw_status_key not in _STATUS_LABELS:
-            payload["status_key"] = "working"
+        status_key: StatusKey = (
+            cast(StatusKey, raw_status_key)
+            if raw_status_key in _STATUS_LABELS
+            else "working"
+        )
+        payload["status_key"] = status_key
         try:
             return PhaseStatus.model_validate(payload)
         except ValidationError:
-            label = str(status.get("label", "") or "").strip() or "Working..."
+            label = (
+                str(status.get("label", "") or "").strip() or _STATUS_LABELS[status_key]
+            )
             return PhaseStatus(
                 trace_id=trace_id or "phase-status",
-                status_key="working",
+                status_key=status_key,
                 label=label,
                 route=str(status.get("route", "") or status.get("mode", "") or "")
                 .strip()
@@ -188,9 +194,12 @@ def coerce_phase_status(status: PhaseStatus | Mapping[str, Any] | None) -> Phase
                     status.get("total_output_tokens_used")
                 ),
                 total_tokens_used=_coerce_int(status.get("total_tokens_used")),
-                token_usage_estimated=bool(status.get("token_usage_estimated", False)),
+                token_usage_estimated=_coerce_bool(
+                    status.get("token_usage_estimated"),
+                    default=False,
+                ),
                 detail_text=str(status.get("detail_text", "") or "").strip() or None,
-                terminal=bool(status.get("terminal", False)),
+                terminal=_coerce_bool(status.get("terminal"), default=False),
             )
     return PhaseStatus(
         trace_id="phase-status",
@@ -302,12 +311,29 @@ def _inline_status_detail_text(value: Any) -> str:
 
 
 def _coerce_int(value: Any) -> int | None:
-    if value is None or value == "":
+    if value is None or value == "" or isinstance(value, bool):
         return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
         return None
+    return parsed if parsed >= 0 else None
+
+
+def _coerce_bool(value: Any, *, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        token = value.strip().lower()
+        if token in {"1", "true", "yes", "y", "on"}:
+            return True
+        if token in {"0", "false", "no", "n", "off", ""}:
+            return False
+    return default
 
 
 def _format_token_count(tokens: int) -> str:
@@ -610,7 +636,10 @@ def normalize_phase_status(
         total_input_tokens_used=normalized_total_input_tokens_used,
         total_output_tokens_used=normalized_total_output_tokens_used,
         total_tokens_used=normalized_total_tokens_used,
-        token_usage_estimated=bool(payload.get("token_usage_estimated", False)),
+        token_usage_estimated=_coerce_bool(
+            payload.get("token_usage_estimated"),
+            default=False,
+        ),
         tool_name=normalized_tool_name,
         progress_phase=normalized_progress_phase,
         detail_code=detail_code,
